@@ -17,6 +17,7 @@ from matplotlib.colors import Normalize, LinearSegmentedColormap
 from ..constraints.boundary import SiteBoundary
 from ..core.wind_resource import WindResource
 from ..farm.aep import FarmResult
+from ..farm.metrics import relative_change
 from ..optimization.ga import OptimizeResult
 
 
@@ -303,9 +304,7 @@ def plot_convergence(
             label=f"网格布局基线: {baseline_aep/1e3:.2f} GWh",
         )
 
-    improvement = 0.0
-    if baseline_aep is not None and baseline_aep > 0:
-        improvement = (optimize_result.best_fitness - baseline_aep) / baseline_aep * 100
+    improvement = relative_change(optimize_result.best_fitness, baseline_aep)
 
     ax.set_xlabel("迭代代数")
     ax.set_ylabel("净年发电量 (GWh)")
@@ -317,7 +316,7 @@ def plot_convergence(
         f"最优解: {optimize_result.best_fitness/1e3:.2f} GWh\n"
         f"找到代数: {optimize_result.best_generation}"
     )
-    if improvement > 0:
+    if improvement is not None and improvement > 0:
         info_text += f"\n相对提升: {improvement:.2f}%"
 
     ax.text(
@@ -527,16 +526,16 @@ def plot_comparison(
 
     metrics = ["净AEP", "尾流损失", "容量系数", "单机平均AEP"]
     baseline_vals = [
-        baseline_result.net_aep,
+        baseline_result.net_aep / 1e3,
         baseline_result.wake_loss_pct,
         baseline_result.capacity_factor,
-        baseline_result.net_aep / len(baseline_result.turbine_results),
+        baseline_result.net_aep / len(baseline_result.turbine_results) / 1e3,
     ]
     optimized_vals = [
-        optimized_result.net_aep,
+        optimized_result.net_aep / 1e3,
         optimized_result.wake_loss_pct,
         optimized_result.capacity_factor,
-        optimized_result.net_aep / len(optimized_result.turbine_results),
+        optimized_result.net_aep / len(optimized_result.turbine_results) / 1e3,
     ]
     units = ["GWh", "%", "%", "GWh/台"]
 
@@ -559,16 +558,18 @@ def plot_comparison(
                 fontweight="bold",
             )
 
-        improvement = 0.0
-        if baseline_vals[i] > 0:
-            if i == 1:
-                improvement = (baseline_vals[i] - optimized_vals[i]) / baseline_vals[i] * 100
-                ax.set_title(f"{metrics[i]} (减少 {improvement:.1f}%)", fontsize=12, fontweight="bold")
-            else:
-                improvement = (optimized_vals[i] - baseline_vals[i]) / baseline_vals[i] * 100
-                ax.set_title(f"{metrics[i]} (提升 {improvement:.1f}%)", fontsize=12, fontweight="bold")
+        if i == 1:
+            change_pct = relative_change(optimized_vals[i], baseline_vals[i], reduction=True)
+            change_label = "减少"
         else:
+            change_pct = relative_change(optimized_vals[i], baseline_vals[i])
+            change_label = "提升"
+
+        if change_pct is None:
+            # 零基准下新值非零，相对变化无法定义；标题只保留指标名。
             ax.set_title(metrics[i], fontsize=12, fontweight="bold")
+        else:
+            ax.set_title(f"{metrics[i]} ({change_label} {change_pct:.1f}%)", fontsize=12, fontweight="bold")
 
         ax.set_ylabel(units[i])
         ax.grid(True, alpha=0.3, axis="y")

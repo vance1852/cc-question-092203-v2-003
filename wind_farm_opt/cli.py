@@ -18,6 +18,12 @@ from .core.wind_resource import WindResource
 from .core.wake import WakeModel
 from .constraints.boundary import SiteBoundary
 from .farm.aep import AEPCalculator, FarmResult
+from .farm.metrics import (
+    compare_layouts,
+    finite_float,
+    format_percent,
+    format_signed_quantity,
+)
 from .optimization.baseline import generate_grid_layout
 from .optimization.ga import GeneticAlgorithm, GAConfig
 from .optimization.pso import ParticleSwarmOptimizer, PSOConfig
@@ -163,20 +169,17 @@ class WindFarmOptimizerCLI:
         self._print_result_summary(self.optimized_result, "优化后布局")
 
         if self.baseline_result is not None:
-            improvement = (
-                (self.optimized_result.net_aep - self.baseline_result.net_aep)
-                / self.baseline_result.net_aep
-                * 100
-            )
-            loss_reduction = (
-                (self.baseline_result.wake_loss_pct - self.optimized_result.wake_loss_pct)
-                / self.baseline_result.wake_loss_pct
-                * 100
-            )
-            print(f"\n--- 优化提升 ---")
-            print(f"  发电量提升:   {improvement:+.2f}%")
-            print(f"  尾流损失减少: {loss_reduction:+.2f}%")
-            print(f"  额外发电量:   {(self.optimized_result.net_aep - self.baseline_result.net_aep)/1e3:+.2f} GWh/年")
+            comparison = compare_layouts(self.baseline_result, self.optimized_result)
+            if comparison is not None:
+                additional_gwh = (
+                    comparison.additional_aep_mwh / 1e3
+                    if comparison.additional_aep_mwh is not None
+                    else None
+                )
+                print(f"\n--- 优化提升 ---")
+                print(f"  发电量提升:   {format_percent(comparison.aep_improvement_pct)}")
+                print(f"  尾流损失减少: {format_percent(comparison.loss_reduction_pct)}")
+                print(f"  额外发电量:   {format_signed_quantity(additional_gwh, suffix=' GWh/年')}")
 
     def run_economic_analysis(self) -> None:
         """运行经济性分析。"""
@@ -214,7 +217,8 @@ class WindFarmOptimizerCLI:
         print(f"  初始投资:      {self.economic_result.total_capital_cost/1e4:.2f} 亿元")
         print(f"  年运维费用:    {self.economic_result.total_om_cost_annual:.1f} 万元/年")
         print(f"  年发电收益:    {self.economic_result.annual_revenue:.1f} 万元/年")
-        print(f"  度电成本:      {self.economic_result.lcoe:.3f} 元/kWh")
+        lcoe_value = finite_float(self.economic_result.lcoe)
+        print(f"  度电成本:      {lcoe_value:.3f} 元/kWh" if lcoe_value is not None else "  度电成本:      N/A (无发电量)")
 
         if self.economic_result.npv is not None:
             print(f"  净现值(NPV):   {self.economic_result.npv/1e4:+.2f} 亿元")
@@ -450,39 +454,39 @@ class WindFarmOptimizerCLI:
 
         if self.economic_result is not None:
             results["economic"] = {
-                "total_capital_cost_yiyuan": float(self.economic_result.total_capital_cost / 1e4),
-                "annual_revenue_wanyuan": float(self.economic_result.annual_revenue),
-                "lcoe_yuan_per_kwh": float(self.economic_result.lcoe),
-                "npv_yiyuan": float(self.economic_result.npv / 1e4) if self.economic_result.npv is not None else None,
-                "irr_pct": float(self.economic_result.irr) if self.economic_result.irr is not None else None,
-                "payback_years": float(self.economic_result.payback_period) if self.economic_result.payback_period is not None else None,
+                "total_capital_cost_yiyuan": finite_float(self.economic_result.total_capital_cost / 1e4),
+                "annual_revenue_wanyuan": finite_float(self.economic_result.annual_revenue),
+                # 无风/零发电量时 LCOE 为无穷大，统一记为 null，避免输出 Infinity。
+                "lcoe_yuan_per_kwh": finite_float(self.economic_result.lcoe),
+                "npv_yiyuan": finite_float(self.economic_result.npv / 1e4) if self.economic_result.npv is not None else None,
+                "irr_pct": finite_float(self.economic_result.irr) if self.economic_result.irr is not None else None,
+                "payback_years": finite_float(self.economic_result.payback_period) if self.economic_result.payback_period is not None else None,
             }
 
-        if self.baseline_result is not None and self.optimized_result is not None:
+        comparison = compare_layouts(self.baseline_result, self.optimized_result)
+        if comparison is not None:
             results["improvement"] = {
-                "aep_improvement_pct": float(
-                    (self.optimized_result.net_aep - self.baseline_result.net_aep)
-                    / self.baseline_result.net_aep * 100
+                "aep_improvement_pct": comparison.aep_improvement_pct,
+                "additional_aep_gwh": (
+                    comparison.additional_aep_mwh / 1e3
+                    if comparison.additional_aep_mwh is not None
+                    else None
                 ),
-                "additional_aep_gwh": float(
-                    (self.optimized_result.net_aep - self.baseline_result.net_aep) / 1e3
-                ),
-                "loss_reduction_pct": float(
-                    (self.baseline_result.wake_loss_pct - self.optimized_result.wake_loss_pct)
-                    / self.baseline_result.wake_loss_pct * 100
-                ),
+                "loss_reduction_pct": comparison.loss_reduction_pct,
             }
 
         if self.sweep_results is not None:
             results["turbine_sweep"] = {
                 "n_turbines": self.sweep_results["n_turbines"],
-                "aep_mwh": self.sweep_results["aep"],
-                "lcoe_yuan_per_kwh": self.sweep_results["lcoe"],
+                "aep_mwh": [finite_float(v) for v in self.sweep_results["aep"]],
+                "lcoe_yuan_per_kwh": [finite_float(v) for v in self.sweep_results["lcoe"]],
             }
 
         results_path = os.path.join(output_dir, "results.json")
         with open(results_path, "w", encoding="utf-8") as f:
-            json.dump(results, f, indent=2, ensure_ascii=False)
+            # allow_nan=False：所有指标在源头已归一为有限值或 null；
+            # 若仍有 NaN/Infinity 泄漏，立即报错而不是写出非法 JSON。
+            json.dump(results, f, indent=2, ensure_ascii=False, allow_nan=False)
 
         config_path = os.path.join(output_dir, "config.json")
         self.config.to_json(config_path)
