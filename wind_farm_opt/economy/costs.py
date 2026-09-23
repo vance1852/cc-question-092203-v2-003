@@ -74,8 +74,8 @@ class EconomicResult:
         净年发电量 (GWh/year)
     annual_revenue : float
         年收益 (万元/year)
-    lcoe : float
-        度电成本 (元/kWh)
+    lcoe : Optional[float]
+        度电成本 (元/kWh)，年发电量为零、无法定义时为 None
     total_capital_cost : float
         总初始投资 (万元)
     total_om_cost_annual : float
@@ -93,7 +93,7 @@ class EconomicResult:
     total_installed_capacity: float
     net_aep: float
     annual_revenue: float
-    lcoe: float
+    lcoe: Optional[float]
     total_capital_cost: float
     total_om_cost_annual: float
     npv: Optional[float]
@@ -214,7 +214,7 @@ class EconomicAnalyzer:
         total_om_cost_annual: float,
         net_aep_GWh: float,
         lifetime: Optional[float] = None,
-    ) -> float:
+    ) -> Optional[float]:
         """计算度电成本(LCOE)。
 
         LCOE = 总费用现值 / 总发电量现值
@@ -247,8 +247,10 @@ class EconomicAnalyzer:
         total_cost_pv = total_capital_cost + total_om_cost_annual * annuity_factor
         total_energy_pv = net_aep_GWh * 1e6 * annuity_factor
 
+        # 零发电量（如无风/全部停机）时 LCOE 无定义：返回 None（JSON 中为 null），
+        # 不得返回 np.inf —— 那会让 json.dump 写出非标准的 Infinity 标记。
         if total_energy_pv <= 0:
-            return np.inf
+            return None
 
         lcoe_yuan_per_kwh = (total_cost_pv * 1e4) / total_energy_pv
 
@@ -421,7 +423,7 @@ class EconomicAnalyzer:
             total_installed_capacity=float(total_capacity),
             net_aep=float(net_aep_GWh),
             annual_revenue=float(annual_revenue),
-            lcoe=float(lcoe),
+            lcoe=None if lcoe is None else float(lcoe),
             total_capital_cost=float(total_capital_cost),
             total_om_cost_annual=float(annual_om_cost),
             npv=npv,

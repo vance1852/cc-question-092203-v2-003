@@ -11,6 +11,7 @@ import numpy as np
 from ..core.turbine import Turbine
 from ..core.wind_resource import WindResource
 from ..core.wake import WakeModel, superpose_wakes
+from .metrics import safe_percent
 
 
 @dataclass
@@ -398,17 +399,17 @@ class AEPCalculator:
         gross_aep = float(np.sum(gross_aep_by_turbine)) / 1e3
         net_aep = float(np.sum(net_aep_by_turbine)) / 1e3
         total_loss = gross_aep - net_aep
-        wake_loss_pct = (total_loss / gross_aep * 100.0) if gross_aep > 0 else 0.0
+        wake_loss_pct = safe_percent(total_loss, gross_aep)
 
         total_installed = float(np.sum(self._rated_powers)) / 1e3
-        capacity_factor = (net_aep / (total_installed * 8760.0) * 100.0) if total_installed > 0 else 0.0
+        capacity_factor = safe_percent(net_aep, total_installed * 8760.0)
 
         turbine_results = []
         for i in range(n_turb):
             gross = gross_aep_by_turbine[i] / 1e3
             net = net_aep_by_turbine[i] / 1e3
             loss = gross - net
-            loss_pct = (loss / gross * 100.0) if gross > 0 else 0.0
+            loss_pct = safe_percent(loss, gross)
 
             loss_sources = {}
             for j in range(n_turb):
@@ -426,7 +427,9 @@ class AEPCalculator:
                 net_aep=float(net),
                 wake_loss=float(loss),
                 wake_loss_pct=float(loss_pct),
-                capacity_factor=float(net / (self._rated_powers[i] / 1e3 * 8760.0) * 100.0) if self._rated_powers[i] > 0 else 0.0,
+                capacity_factor=float(
+                    safe_percent(net, (self._rated_powers[i] / 1e3) * 8760.0)
+                ),
                 avg_effective_speed=0.0,
                 dominant_wake_source=dominant_source,
                 total_power_loss_by_source=loss_sources,

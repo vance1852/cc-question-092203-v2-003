@@ -18,6 +18,11 @@ from .core.wind_resource import WindResource
 from .core.wake import WakeModel
 from .constraints.boundary import SiteBoundary
 from .farm.aep import AEPCalculator, FarmResult
+from .farm.metrics import (
+    compare_farm_results,
+    format_percent,
+    format_signed_number,
+)
 from .optimization.baseline import generate_grid_layout
 from .optimization.ga import GeneticAlgorithm, GAConfig
 from .optimization.pso import ParticleSwarmOptimizer, PSOConfig
@@ -162,21 +167,20 @@ class WindFarmOptimizerCLI:
         print("\n--- 优化后结果 ---")
         self._print_result_summary(self.optimized_result, "优化后布局")
 
-        if self.baseline_result is not None:
-            improvement = (
-                (self.optimized_result.net_aep - self.baseline_result.net_aep)
-                / self.baseline_result.net_aep
-                * 100
+        comparison = compare_farm_results(self.baseline_result, self.optimized_result)
+        if comparison is not None:
+            print("\n--- 优化提升 ---")
+            print(f"  发电量提升:   {format_percent(comparison.aep_change_pct)}")
+            print(f"  尾流损失减少: {format_percent(comparison.wake_loss_reduction_pct)}")
+            additional_gwh = (
+                comparison.aep_change_mwh / 1e3
+                if comparison.aep_change_mwh is not None
+                else None
             )
-            loss_reduction = (
-                (self.baseline_result.wake_loss_pct - self.optimized_result.wake_loss_pct)
-                / self.baseline_result.wake_loss_pct
-                * 100
+            print(
+                f"  额外发电量:   "
+                f"{format_signed_number(additional_gwh, unit=' GWh/年')}"
             )
-            print(f"\n--- 优化提升 ---")
-            print(f"  发电量提升:   {improvement:+.2f}%")
-            print(f"  尾流损失减少: {loss_reduction:+.2f}%")
-            print(f"  额外发电量:   {(self.optimized_result.net_aep - self.baseline_result.net_aep)/1e3:+.2f} GWh/年")
 
     def run_economic_analysis(self) -> None:
         """运行经济性分析。"""
@@ -214,7 +218,12 @@ class WindFarmOptimizerCLI:
         print(f"  初始投资:      {self.economic_result.total_capital_cost/1e4:.2f} 亿元")
         print(f"  年运维费用:    {self.economic_result.total_om_cost_annual:.1f} 万元/年")
         print(f"  年发电收益:    {self.economic_result.annual_revenue:.1f} 万元/年")
-        print(f"  度电成本:      {self.economic_result.lcoe:.3f} 元/kWh")
+        lcoe_text = (
+            f"{self.economic_result.lcoe:.3f} 元/kWh"
+            if self.economic_result.lcoe is not None
+            else "N/A（年发电量为零）"
+        )
+        print(f"  度电成本:      {lcoe_text}")
 
         if self.economic_result.npv is not None:
             print(f"  净现值(NPV):   {self.economic_result.npv/1e4:+.2f} 亿元")
@@ -288,7 +297,12 @@ class WindFarmOptimizerCLI:
                 sweep_data["aep"].append(result.net_aep)
                 sweep_data["lcoe"].append(econ_result.lcoe)
 
-                print(f"    净AEP: {result.net_aep/1e3:.1f} GWh, LCOE: {econ_result.lcoe:.3f} 元/kWh")
+                lcoe_text = (
+                    f"{econ_result.lcoe:.3f} 元/kWh"
+                    if econ_result.lcoe is not None
+                    else "N/A"
+                )
+                print(f"    净AEP: {result.net_aep/1e3:.1f} GWh, LCOE: {lcoe_text}")
             except Exception as e:
                 print(f"    跳过: {e}")
 
@@ -452,32 +466,29 @@ class WindFarmOptimizerCLI:
             results["economic"] = {
                 "total_capital_cost_yiyuan": float(self.economic_result.total_capital_cost / 1e4),
                 "annual_revenue_wanyuan": float(self.economic_result.annual_revenue),
-                "lcoe_yuan_per_kwh": float(self.economic_result.lcoe),
+                "lcoe_yuan_per_kwh": (
+                    float(self.economic_result.lcoe)
+                    if self.economic_result.lcoe is not None
+                    else None
+                ),
                 "npv_yiyuan": float(self.economic_result.npv / 1e4) if self.economic_result.npv is not None else None,
                 "irr_pct": float(self.economic_result.irr) if self.economic_result.irr is not None else None,
                 "payback_years": float(self.economic_result.payback_period) if self.economic_result.payback_period is not None else None,
             }
 
-        if self.baseline_result is not None and self.optimized_result is not None:
-            results["improvement"] = {
-                "aep_improvement_pct": float(
-                    (self.optimized_result.net_aep - self.baseline_result.net_aep)
-                    / self.baseline_result.net_aep * 100
-                ),
-                "additional_aep_gwh": float(
-                    (self.optimized_result.net_aep - self.baseline_result.net_aep) / 1e3
-                ),
-                "loss_reduction_pct": float(
-                    (self.baseline_result.wake_loss_pct - self.optimized_result.wake_loss_pct)
-                    / self.baseline_result.wake_loss_pct * 100
-                ),
-            }
+        # 对比指标恒由共享逻辑给出：缺一侧（如未执行优化）时整体为 null，
+        # 分母为零而新值为正时对应字段为 null，双方皆零时为 0.0。
+        comparison = compare_farm_results(self.baseline_result, self.optimized_result)
+        results["improvement"] = comparison.to_dict() if comparison is not None else None
 
         if self.sweep_results is not None:
             results["turbine_sweep"] = {
                 "n_turbines": self.sweep_results["n_turbines"],
                 "aep_mwh": self.sweep_results["aep"],
-                "lcoe_yuan_per_kwh": self.sweep_results["lcoe"],
+                "lcoe_yuan_per_kwh": [
+                    float(v) if v is not None else None
+                    for v in self.sweep_results["lcoe"]
+                ],
             }
 
         results_path = os.path.join(output_dir, "results.json")

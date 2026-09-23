@@ -17,6 +17,7 @@ from matplotlib.colors import Normalize, LinearSegmentedColormap
 from ..constraints.boundary import SiteBoundary
 from ..core.wind_resource import WindResource
 from ..farm.aep import FarmResult
+from ..farm.metrics import relative_change, relative_reduction
 from ..optimization.ga import OptimizeResult
 
 
@@ -303,9 +304,12 @@ def plot_convergence(
             label=f"网格布局基线: {baseline_aep/1e3:.2f} GWh",
         )
 
-    improvement = 0.0
-    if baseline_aep is not None and baseline_aep > 0:
-        improvement = (optimize_result.best_fitness - baseline_aep) / baseline_aep * 100
+    # 相对提升与对比图、控制台、JSON 共用同一套定义，
+    # 零基线且双方皆零时为 0.0，零基线而优化后有发电量时为 None（不显示）。
+    improvement = relative_change(
+        optimize_result.best_fitness if baseline_aep is not None else None,
+        baseline_aep,
+    )
 
     ax.set_xlabel("迭代代数")
     ax.set_ylabel("净年发电量 (GWh)")
@@ -317,8 +321,8 @@ def plot_convergence(
         f"最优解: {optimize_result.best_fitness/1e3:.2f} GWh\n"
         f"找到代数: {optimize_result.best_generation}"
     )
-    if improvement > 0:
-        info_text += f"\n相对提升: {improvement:.2f}%"
+    if improvement is not None:
+        info_text += f"\n相对提升: {improvement:+.2f}%"
 
     ax.text(
         0.02,
@@ -393,7 +397,11 @@ def plot_aep_vs_turbines(
         )
 
     if lcoe_list is not None:
-        lcoe_array = np.array(lcoe_list)
+        # 零发电量的台数档 LCOE 为 None，统一转成 NaN：折线在该点断开，
+        # 标注显示 N/A，而不是写出无意义的无穷值。
+        lcoe_array = np.array(
+            [v if v is not None else np.nan for v in lcoe_list], dtype=np.float64
+        )
         ax2.plot(n_turbines, lcoe_array, "ro-", linewidth=2, markersize=8, label="LCOE")
         ax2.set_xlabel("风机台数")
         ax2.set_ylabel("度电成本 (元/kWh)")
@@ -401,6 +409,8 @@ def plot_aep_vs_turbines(
         ax2.legend(loc="upper right")
 
         for i, (n, lcoe) in enumerate(zip(n_turbines, lcoe_array)):
+            if np.isnan(lcoe):
+                continue
             ax2.annotate(
                 f"{lcoe:.3f}",
                 (n, lcoe),
@@ -540,6 +550,19 @@ def plot_comparison(
     ]
     units = ["GWh", "%", "%", "GWh/台"]
 
+    # 各子图标题中的相对变化统一走共享指标定义，与控制台摘要、JSON 完全同源；
+    # 尾流损失用"降幅"语义，其余指标用"提升"语义。不可用时标题仅显示指标名。
+    title_changes: list[Optional[float]] = []
+    for i in range(len(metrics)):
+        if i == 1:
+            title_changes.append(
+                relative_reduction(baseline_vals[i], optimized_vals[i])
+            )
+        else:
+            title_changes.append(
+                relative_change(optimized_vals[i], baseline_vals[i])
+            )
+
     for i, ax in enumerate(axes.flat):
         x = ["基线", "优化后"]
         y = [baseline_vals[i], optimized_vals[i]]
@@ -559,16 +582,13 @@ def plot_comparison(
                 fontweight="bold",
             )
 
-        improvement = 0.0
-        if baseline_vals[i] > 0:
-            if i == 1:
-                improvement = (baseline_vals[i] - optimized_vals[i]) / baseline_vals[i] * 100
-                ax.set_title(f"{metrics[i]} (减少 {improvement:.1f}%)", fontsize=12, fontweight="bold")
-            else:
-                improvement = (optimized_vals[i] - baseline_vals[i]) / baseline_vals[i] * 100
-                ax.set_title(f"{metrics[i]} (提升 {improvement:.1f}%)", fontsize=12, fontweight="bold")
-        else:
+        change = title_changes[i]
+        if change is None:
             ax.set_title(metrics[i], fontsize=12, fontweight="bold")
+        elif i == 1:
+            ax.set_title(f"{metrics[i]} (减少 {change:.1f}%)", fontsize=12, fontweight="bold")
+        else:
+            ax.set_title(f"{metrics[i]} (提升 {change:.1f}%)", fontsize=12, fontweight="bold")
 
         ax.set_ylabel(units[i])
         ax.grid(True, alpha=0.3, axis="y")
